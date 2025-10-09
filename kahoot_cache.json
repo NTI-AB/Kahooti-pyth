@@ -1,0 +1,48 @@
+{
+  "8246d8cdb8e50af2fb73477e9f86d5070cbfd7da": {
+    "question": "What does a habitat provide for living things?",
+    "answers": [
+      "crayons, pencils and cookies",
+      "rocks, soil and roots",
+      "food, water and shelter"
+    ],
+    "correct": "food, water and shelter"
+  },
+  "5e29d8b8e96b2324b00fb7e7ac4798efd9605946": {
+    "question": "If the number of different kinds of animals and plants in a place goes down, what will happen?",
+    "answers": [
+      "biodiversity in that place will stay the same",
+      "biodiversity in that place will go up",
+      "biodiversity in that place will go down"
+    ],
+    "correct": "biodiversity in that place will go down"
+  },
+  "1b2fa48d0924b7dfda2fab6795c44db3e468f565": {
+    "question": "What does climate change mean?",
+    "answers": [
+      "climate change is the long-term change in weather patterns everywhere",
+      "climate change is when the moon blocks out the sun",
+      "climate change is when one season changes to another, spring becomes summer"
+    ],
+    "correct": "climate change is the long-term change in weather patterns everywhere"
+  },
+  "7f130833729cf882b57155912e179bdfbd496033": {
+    "question": "How many different species are there on the planet?",
+    "answers": [
+      "more than 10 million",
+      "more than 8 million",
+      "less than 5 million"
+    ],
+    "correct": "more than 8 million"
+  },
+  "c8b9aff17901dfa90f94dc192b7fd76d21eb1234": {
+    "question": "Which of these can help reduce emissions and slow climate change?",
+    "answers": [
+      "planting more trees",
+      "all of the above",
+      "using renewable sources of energy",
+      "using bicycles instead of cars"
+    ],
+    "correct": "all of the above"
+  }
+}
