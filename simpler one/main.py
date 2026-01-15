@@ -11,14 +11,6 @@ from PIL import Image
 OLLAMA_URL = "http://localhost:11434/api/chat"
 OLLAMA_MODEL = "llava:7b"
 
-PROMPT = """
-This is a multiple-choice Kahoot question.
-The image may be helpful or may be decorative.
-Only use the image if it is clearly relevant.
-Choose the best answer.
-Reply ONLY with A, B, C, or D.
-""".strip()
-
 # =========================================
 
 
@@ -39,7 +31,7 @@ def resize_to_512(src, dst):
 def extract_question_image(driver):
     imgs = driver.find_elements(By.TAG_NAME, "img")
 
-    best = None
+    best_src = None
     best_area = 0
 
     for img in imgs:
@@ -48,16 +40,16 @@ def extract_question_image(driver):
             size = img.size
             area = size["width"] * size["height"]
             if src and area > best_area:
-                best = src
+                best_src = src
                 best_area = area
         except:
             pass
 
-    if not best:
+    if not best_src:
         return None
 
     log("Found HTML image, downloading it")
-    r = requests.get(best, timeout=10)
+    r = requests.get(best_src, timeout=10)
     with open("q_raw.png", "wb") as f:
         f.write(r.content)
 
@@ -72,36 +64,45 @@ def screenshot_fallback(driver):
     return "q.png"
 
 
-# ---------- OLLAMA ----------
+# ---------- OLLAMA (FIXED) ----------
 
-def ask_llava(prompt, image_path, max_tokens=80):
-    log("Sending prompt + image to LLaVA")
+def ask_llava(question, answers, image_path, max_tokens=80):
+    log("Sending question + answers + image to LLaVA")
+
+    labeled = [f"{chr(65+i)}) {a}" for i, a in enumerate(answers)]
+    prompt = (
+        "This is a multiple-choice Kahoot question.\n"
+        "The image may be helpful or may be decorative.\n"
+        "Only use the image if it is clearly relevant.\n\n"
+        f"Question:\n{question}\n\n"
+        "Options:\n" + "\n".join(labeled) + "\n\n"
+        "Reply ONLY with A, B, C, or D."
+    )
 
     with open(image_path, "rb") as f:
         img_b64 = base64.b64encode(f.read()).decode()
 
     payload = {
         "model": OLLAMA_MODEL,
-        "messages": [{
-            "role": "user",
-            "content": prompt,
-            "images": [img_b64]
-        }],
+        "messages": [
+            {
+                "role": "user",
+                "content": prompt,
+                "images": [img_b64]
+            }
+        ],
         "options": {
             "temperature": 0.4,
             "num_predict": max_tokens
         },
-        "stream": True
+        "stream": False   # IMPORTANT FOR IMAGES
     }
 
-    text = ""
-    with requests.post(OLLAMA_URL, json=payload, stream=True, timeout=60) as r:
-        for line in r.iter_lines():
-            if not line:
-                continue
-            data = json.loads(line)
-            if "message" in data and "content" in data["message"]:
-                text += data["message"]["content"]
+    r = requests.post(OLLAMA_URL, json=payload, timeout=60)
+    r.raise_for_status()
+
+    data = r.json()
+    text = data["message"]["content"]
 
     log(f"Raw AI response: {text!r}")
     return text.strip()
@@ -123,8 +124,7 @@ def get_answer_buttons(driver):
 
     for b in buttons:
         try:
-            t = b.text.strip()
-            if t:
+            if b.text.strip():
                 answer_buttons.append(b)
         except:
             pass
@@ -136,7 +136,7 @@ def click_answer(driver, letter):
     idx = {"A": 0, "B": 1, "C": 2, "D": 3}[letter]
     buttons = get_answer_buttons(driver)
 
-    log("Detected answer buttons:")
+    log("Detected answer options:")
     for i, b in enumerate(buttons):
         log(f"  {i}: {b.text!r}")
 
@@ -149,15 +149,13 @@ def click_answer(driver, letter):
 
 def click_confidence(driver):
     time.sleep(0.2)
-    try:
-        btn = driver.find_element(
-            By.CSS_SELECTOR,
-            '[data-functional-selector="confidence-strength-level-1"]'
-        )
-        btn.click()
+    btns = driver.find_elements(
+        By.CSS_SELECTOR,
+        '[data-functional-selector="confidence-strength-level-1"]'
+    )
+    if btns:
+        btns[0].click()
         log("Clicked confidence (extra points)")
-    except:
-        log("Confidence screen not found, skipping")
 
 
 # ---------- MAIN LOOP ----------
@@ -166,16 +164,21 @@ def main():
     driver = webdriver.Chrome()
     driver.get("https://kahoot.it")
 
-    log("Waiting for Kahoot questions...")
+    log("Bot started. Waiting for questions...")
     last_question = ""
 
     while True:
         try:
-            q_el = driver.find_element(
+            q_els = driver.find_elements(
                 By.CSS_SELECTOR,
                 '[data-functional-selector="block-title"]'
             )
-            question = q_el.text.strip()
+
+            if not q_els:
+                time.sleep(0.2)
+                continue
+
+            question = q_els[0].text.strip()
 
             if not question or question == last_question:
                 time.sleep(0.2)
@@ -184,13 +187,27 @@ def main():
             last_question = question
             log(f"New question detected: {question!r}")
 
-            # --- Image ---
+            # Collect answers
+            ans_els = driver.find_elements(
+                By.CSS_SELECTOR,
+                '[data-functional-selector^="question-choice-text-"]'
+            )
+            answers = [a.text.strip() for a in ans_els if a.text.strip()]
+
+            log(f"Detected answers: {answers}")
+
+            if len(answers) < 2:
+                log("Not enough answers detected, skipping")
+                time.sleep(1)
+                continue
+
+            # Image
             img = extract_question_image(driver)
             if not img:
                 img = screenshot_fallback(driver)
 
-            # --- AI ---
-            ai_text = ask_llava(PROMPT, img)
+            # AI
+            ai_text = ask_llava(question, answers, img)
             answer = parse_answer(ai_text)
 
             if not answer:
@@ -198,20 +215,19 @@ def main():
                 time.sleep(1)
                 continue
 
-            log(f"Got response to answer: {answer}")
+            log(f"Got response to answer {answer}")
 
-            # --- Click ---
             click_answer(driver, answer)
             click_confidence(driver)
 
-            log("Answer submitted, waiting for next question\n")
-            time.sleep(2)
+            log("Answer submitted\n")
+            time.sleep(1.5)
 
         except KeyboardInterrupt:
             log("Stopped by user")
             break
         except Exception as e:
-            log(f"Error: {e}")
+            log(f"Unexpected error: {e}")
             time.sleep(1)
 
     driver.quit()
