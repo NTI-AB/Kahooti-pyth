@@ -19,8 +19,14 @@ Choose the best answer.
 Reply ONLY with A, B, C, or D.
 """.strip()
 
-# ==========================================
+# =========================================
 
+
+def log(msg):
+    print(f"[BOT] {msg}", flush=True)
+
+
+# ---------- IMAGE HELPERS ----------
 
 def resize_to_512(src, dst):
     img = Image.open(src).convert("RGB")
@@ -30,7 +36,47 @@ def resize_to_512(src, dst):
     img.save(dst, format="PNG")
 
 
-def ask_llava(prompt, image_path, max_tokens=60):
+def extract_question_image(driver):
+    imgs = driver.find_elements(By.TAG_NAME, "img")
+
+    best = None
+    best_area = 0
+
+    for img in imgs:
+        try:
+            src = img.get_attribute("src")
+            size = img.size
+            area = size["width"] * size["height"]
+            if src and area > best_area:
+                best = src
+                best_area = area
+        except:
+            pass
+
+    if not best:
+        return None
+
+    log("Found HTML image, downloading it")
+    r = requests.get(best, timeout=10)
+    with open("q_raw.png", "wb") as f:
+        f.write(r.content)
+
+    resize_to_512("q_raw.png", "q.png")
+    return "q.png"
+
+
+def screenshot_fallback(driver):
+    log("No suitable HTML image found, taking screenshot")
+    driver.save_screenshot("q_raw.png")
+    resize_to_512("q_raw.png", "q.png")
+    return "q.png"
+
+
+# ---------- OLLAMA ----------
+
+def ask_llava(prompt, image_path, max_tokens=80):
+    log("Sending prompt + image to LLaVA")
+
     with open(image_path, "rb") as f:
         img_b64 = base64.b64encode(f.read()).decode()
 
@@ -49,38 +95,16 @@ def ask_llava(prompt, image_path, max_tokens=60):
     }
 
     text = ""
-    with requests.post(OLLAMA_URL, json=payload, stream=True) as r:
+    with requests.post(OLLAMA_URL, json=payload, stream=True, timeout=60) as r:
         for line in r.iter_lines():
             if not line:
                 continue
             data = json.loads(line)
-            if "message" in data:
+            if "message" in data and "content" in data["message"]:
                 text += data["message"]["content"]
 
+    log(f"Raw AI response: {text!r}")
     return text.strip()
-
-
-def extract_question_image(driver):
-    imgs = driver.find_elements(By.CSS_SELECTOR, '[data-functional-selector="media-container__media-image"]')
-    if not imgs:
-        return None
-
-    src = imgs[0].get_attribute("src")
-    if not src:
-        return None
-
-    r = requests.get(src, timeout=10)
-    with open("q_raw.png", "wb") as f:
-        f.write(r.content)
-
-    resize_to_512("q_raw.png", "q.png")
-    return "q.png"
-
-
-def screenshot_fallback(driver):
-    driver.save_screenshot("q_raw.png")
-    resize_to_512("q_raw.png", "q.png")
-    return "q.png"
 
 
 def parse_answer(text):
@@ -91,48 +115,106 @@ def parse_answer(text):
     return None
 
 
+# ---------- SELENIUM ACTIONS ----------
+
+def get_answer_buttons(driver):
+    buttons = driver.find_elements(By.TAG_NAME, "button")
+    answer_buttons = []
+
+    for b in buttons:
+        try:
+            t = b.text.strip()
+            if t:
+                answer_buttons.append(b)
+        except:
+            pass
+
+    return answer_buttons
+
+
 def click_answer(driver, letter):
     idx = {"A": 0, "B": 1, "C": 2, "D": 3}[letter]
-    btn = driver.find_element(By.CSS_SELECTOR, f'[data-functional-selector="answer-{idx}"]')
-    btn.click()
+    buttons = get_answer_buttons(driver)
+
+    log("Detected answer buttons:")
+    for i, b in enumerate(buttons):
+        log(f"  {i}: {b.text!r}")
+
+    if idx >= len(buttons):
+        raise RuntimeError("Not enough answer buttons detected")
+
+    log(f"Clicking answer {letter}")
+    buttons[idx].click()
 
 
 def click_confidence(driver):
     time.sleep(0.2)
-    btn = driver.find_element(By.CSS_SELECTOR, '[data-functional-selector="confidence-strength-level-1"]')
-    btn.click()
+    try:
+        btn = driver.find_element(
+            By.CSS_SELECTOR,
+            '[data-functional-selector="confidence-strength-level-1"]'
+        )
+        btn.click()
+        log("Clicked confidence (extra points)")
+    except:
+        log("Confidence screen not found, skipping")
 
 
-def wait_for_question(driver):
-    while True:
-        try:
-            driver.find_element(By.CSS_SELECTOR, '[data-functional-selector="block-title"]')
-            return
-        except:
-            time.sleep(0.1)
-
+# ---------- MAIN LOOP ----------
 
 def main():
     driver = webdriver.Chrome()
     driver.get("https://kahoot.it")
 
-    print("Waiting for questions...")
+    log("Waiting for Kahoot questions...")
+    last_question = ""
 
     while True:
-        wait_for_question(driver)
+        try:
+            q_el = driver.find_element(
+                By.CSS_SELECTOR,
+                '[data-functional-selector="block-title"]'
+            )
+            question = q_el.text.strip()
 
-        img = extract_question_image(driver)
-        if not img:
-            img = screenshot_fallback(driver)
+            if not question or question == last_question:
+                time.sleep(0.2)
+                continue
 
-        answer_text = ask_llava(PROMPT, img)
-        answer = parse_answer(answer_text)
+            last_question = question
+            log(f"New question detected: {question!r}")
 
-        if answer:
+            # --- Image ---
+            img = extract_question_image(driver)
+            if not img:
+                img = screenshot_fallback(driver)
+
+            # --- AI ---
+            ai_text = ask_llava(PROMPT, img)
+            answer = parse_answer(ai_text)
+
+            if not answer:
+                log("AI did not return a valid answer, skipping")
+                time.sleep(1)
+                continue
+
+            log(f"Got response to answer: {answer}")
+
+            # --- Click ---
             click_answer(driver, answer)
             click_confidence(driver)
 
-        time.sleep(2)  # wait for next question
+            log("Answer submitted, waiting for next question\n")
+            time.sleep(2)
+
+        except KeyboardInterrupt:
+            log("Stopped by user")
+            break
+        except Exception as e:
+            log(f"Error: {e}")
+            time.sleep(1)
+
+    driver.quit()
 
 
 if __name__ == "__main__":
