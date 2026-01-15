@@ -1,32 +1,34 @@
 import time
-import json
-import base64
-import requests
+import re
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
+import requests
 
-# ================= CONFIG =================
+from gemini_client import ask_gemini
+from gemini_client import ask_gemini_needs_image
 
-OLLAMA_URL = "http://localhost:11434/api/chat"
-OLLAMA_MODEL = "llava:7b"
-
-# =========================================
-
+# =========================================================
 
 def log(msg):
     print(f"[BOT] {msg}", flush=True)
 
-
-# ---------- IMAGE HELPERS ----------
+# =========================================================
+# IMAGE HANDLING
+# =========================================================
 
 def resize_to_512(src, dst):
-    img = Image.open(src).convert("RGB")
+    try:
+        img = Image.open(src)
+        img.verify()          # validate file
+        img = Image.open(src).convert("RGB")
+    except UnidentifiedImageError:
+        raise RuntimeError("Downloaded file is not a valid image")
+
     w, h = img.size
     scale = 512 / min(w, h)
     img = img.resize((int(w * scale), int(h * scale)), Image.BICUBIC)
     img.save(dst, format="PNG")
-
 
 def extract_question_image(driver):
     imgs = driver.find_elements(By.TAG_NAME, "img")
@@ -63,60 +65,9 @@ def screenshot_fallback(driver):
     resize_to_512("q_raw.png", "q.png")
     return "q.png"
 
-
-# ---------- OLLAMA (FIXED) ----------
-
-def ask_llava(question, answers, image_path, max_tokens=80):
-    log("Sending question + answers + image to LLaVA")
-
-    labeled = [f"{chr(65+i)}) {a}" for i, a in enumerate(answers)]
-    prompt = (
-        "This is a multiple-choice Kahoot question.\n"
-        "The image may be helpful or may be decorative.\n"
-        "Only use the image if it is clearly relevant.\n\n"
-        f"Question:\n{question}\n\n"
-        "Options:\n" + "\n".join(labeled) + "\n\n"
-        "Reply ONLY with A, B, C, or D."
-    )
-
-    with open(image_path, "rb") as f:
-        img_b64 = base64.b64encode(f.read()).decode()
-
-    payload = {
-        "model": OLLAMA_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": prompt,
-                "images": [img_b64]
-            }
-        ],
-        "options": {
-            "temperature": 0.4,
-            "num_predict": max_tokens
-        },
-        "stream": False   # IMPORTANT FOR IMAGES
-    }
-
-    r = requests.post(OLLAMA_URL, json=payload, timeout=60)
-    r.raise_for_status()
-
-    data = r.json()
-    text = data["message"]["content"]
-
-    log(f"Raw AI response: {text!r}")
-    return text.strip()
-
-
-def parse_answer(text):
-    text = text.upper()
-    for c in ["A", "B", "C", "D"]:
-        if c in text:
-            return c
-    return None
-
-
-# ---------- SELENIUM ACTIONS ----------
+# =========================================================
+# SELENIUM ACTIONS
+# =========================================================
 
 def get_answer_buttons(driver):
     buttons = driver.find_elements(By.TAG_NAME, "button")
@@ -151,14 +102,33 @@ def click_confidence(driver):
     time.sleep(0.2)
     btns = driver.find_elements(
         By.CSS_SELECTOR,
-        '[data-functional-selector="confidence-strength-level-1"]'
+        '[data-functional-selector^="confidence-strength-level-"]'
     )
     if btns:
-        btns[0].click()
-        log("Clicked confidence (extra points)")
+        def level(btn):
+            sel = btn.get_attribute("data-functional-selector") or ""
+            match = re.search(r"(\d+)$", sel)
+            return int(match.group(1)) if match else 0
 
+        btn = max(btns, key=level)
+        sel = btn.get_attribute("data-functional-selector") or "confidence-strength"
+        btn.click()
+        log(f"Clicked confidence ({sel})")
+        return
 
-# ---------- MAIN LOOP ----------
+    for b in driver.find_elements(By.TAG_NAME, "button"):
+        try:
+            text = b.text.strip()
+            if re.search(r"\b(50|75|100)\b", text):
+                b.click()
+                log(f"Clicked confidence (text {text!r})")
+                return
+        except Exception:
+            pass
+
+# =========================================================
+# MAIN LOOP
+# =========================================================
 
 def main():
     driver = webdriver.Chrome()
@@ -187,7 +157,7 @@ def main():
             last_question = question
             log(f"New question detected: {question!r}")
 
-            # Collect answers
+            # ---- collect answers ----
             ans_els = driver.find_elements(
                 By.CSS_SELECTOR,
                 '[data-functional-selector^="question-choice-text-"]'
@@ -201,17 +171,34 @@ def main():
                 time.sleep(1)
                 continue
 
-            # Image
-            img = extract_question_image(driver)
-            if not img:
-                img = screenshot_fallback(driver)
+            # ---- ask Gemini (TEXT vs IMAGE decision) ----
+            needs_img = False
+            try:
+                needs_img = ask_gemini_needs_image(question, answers)
+            except Exception as e:
+                log(f"Image decision failed, defaulting to TEXT: {e}")
 
-            # AI
-            ai_text = ask_llava(question, answers, img)
-            answer = parse_answer(ai_text)
+            img = None
+
+            if needs_img:
+                log("Gemini requested image")
+                try:
+                    img = extract_question_image(driver)
+                    if not img:
+                        img = screenshot_fallback(driver)
+                except Exception as e:
+                    log(f"Image extraction failed, continuing without image: {e}")
+                    img = None
+
+            # ---- answer ----
+            ai_text = ask_gemini(question, answers, img) or ""
+            ai_text = ai_text.strip().upper()
+
+            match = re.search(r"\b([ABCD])\b", ai_text)
+            answer = match.group(1) if match else None
 
             if not answer:
-                log("AI did not return a valid answer, skipping")
+                log(f"Invalid AI response: {ai_text!r}")
                 time.sleep(1)
                 continue
 
