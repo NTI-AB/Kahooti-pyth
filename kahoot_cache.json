@@ -44,5 +44,25 @@
       "using bicycles instead of cars"
     ],
     "correct": "all of the above"
+  },
+  "6ecdb48865e2dbc961a542e1f55c36e4ba750e16": {
+    "question": "A group of dolphins is called a......",
+    "answers": [
+      "school",
+      "herd",
+      "pride",
+      "pod"
+    ],
+    "correct": "pod"
+  },
+  "58c1628e197a8e297c0e357f3110b5daf11daa4d": {
+    "question": "Math question: Sharks can swim 50 miles per hr. How many miles will it swim in 3 hrs?",
+    "answers": [
+      "150 miles",
+      "80 miles",
+      "50 miles",
+      "15 miles"
+    ],
+    "correct": "150 miles"
   }
 }
